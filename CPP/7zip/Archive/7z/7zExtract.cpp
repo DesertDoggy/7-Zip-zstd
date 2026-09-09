@@ -30,6 +30,7 @@ private:
   bool _calcCrc;
   UInt32 _crc;
   UInt64 _rem;
+  Int32 _askMode;
 
   const UInt32 *_indexes;
   // unsigned _startIndex;
@@ -44,8 +45,11 @@ private:
 public:
   const CDbEx *_db;
   CMyComPtr<IArchiveExtractCallback> ExtractCallback;
+  CMyComPtr<IArchiveExtractCallbackData2> DataCallback;
+  CMyComPtr<IArchiveExtractCallbackDataFile2> DataFileCallback;
 
   bool ExtraWriteWasCut;
+  bool StopByDataCallback;
 
   CFolderOutStream():
       TestMode(false),
@@ -68,6 +72,8 @@ HRESULT CFolderOutStream::Init(unsigned startIndex, const UInt32 *indexes, unsig
   
   _fileIsOpen = false;
   ExtraWriteWasCut = false;
+  StopByDataCallback = false;
+  _askMode = NExtract::NAskMode::kSkip;
   
   return ProcessEmptyFiles();
 }
@@ -102,11 +108,28 @@ HRESULT CFolderOutStream::OpenFile(bool isCorrupted)
       && !_db->IsItemAnti(_fileIndex)
       && !fi.IsDir)
     askMode = NExtract::NAskMode::kSkip;
+
+  if (DataFileCallback)
+  {
+    Int32 action = NExtract::NDataAction::kContinue;
+    RINOK(DataFileCallback->OnFileBegin(_fileIndex, fi.Size, askMode, &action))
+    if (action == NExtract::NDataAction::kStop && askMode == NExtract::NAskMode::kTest)
+    {
+      _askMode = askMode;
+      StopByDataCallback = true;
+      return k_My_HRESULT_WritingWasCut;
+    }
+  }
+
+  _askMode = askMode;
   return ExtractCallback->PrepareOperation(askMode);
 }
 
 HRESULT CFolderOutStream::CloseFile_and_SetResult(Int32 res)
 {
+  const UInt32 fileIndex = _fileIndex;
+  const Int32 askMode = _askMode;
+
   _stream.Release();
   _fileIsOpen = false;
   
@@ -119,7 +142,12 @@ HRESULT CFolderOutStream::CloseFile_and_SetResult(Int32 res)
   }
 
   _fileIndex++;
-  return ExtractCallback->SetOperationResult(res);
+  RINOK(ExtractCallback->SetOperationResult(res))
+
+  if (DataFileCallback)
+    RINOK(DataFileCallback->OnFileEnd(fileIndex, res, askMode))
+
+  return S_OK;
 }
 
 HRESULT CFolderOutStream::CloseFile()
@@ -150,11 +178,23 @@ Z7_COM7F_IMF(CFolderOutStream::Write(const void *data, UInt32 size, UInt32 *proc
     if (_fileIsOpen)
     {
       UInt32 cur = (size < _rem ? size : (UInt32)_rem);
+      const UInt64 offsetInFile = _db->Files[_fileIndex].Size - _rem;
       if (_calcCrc)
       {
         const UInt32 k_Step = (UInt32)1 << 20;
         if (cur > k_Step)
           cur = k_Step;
+      }
+      if (DataCallback && _askMode != NExtract::NAskMode::kSkip)
+      {
+        Int32 action = NExtract::NDataAction::kContinue;
+        RINOK(DataCallback->OnData(_fileIndex, offsetInFile, data, cur, _askMode, &action))
+        // We allow fast stop only in test mode to avoid partial file output.
+        if (action == NExtract::NDataAction::kStop && _askMode == NExtract::NAskMode::kTest)
+        {
+          StopByDataCallback = true;
+          return k_My_HRESULT_WritingWasCut;
+        }
       }
       HRESULT result = S_OK;
       if (_stream)
@@ -295,11 +335,19 @@ Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
   CMyComPtr<IArchiveExtractCallbackMessage2> callbackMessage;
   extractCallback.QueryInterface(IID_IArchiveExtractCallbackMessage2, &callbackMessage);
 
+  CMyComPtr<IArchiveExtractCallbackData2> callbackData;
+  extractCallback.QueryInterface(IID_IArchiveExtractCallbackData2, &callbackData);
+
+  CMyComPtr<IArchiveExtractCallbackDataFile2> callbackDataFile;
+  extractCallback.QueryInterface(IID_IArchiveExtractCallbackDataFile2, &callbackDataFile);
+
   CFolderOutStream *folderOutStream = new CFolderOutStream;
   CMyComPtr<ISequentialOutStream> outStream(folderOutStream);
 
   folderOutStream->_db = &_db;
   folderOutStream->ExtractCallback = extractCallback;
+  folderOutStream->DataCallback = callbackData;
+  folderOutStream->DataFileCallback = callbackDataFile;
   folderOutStream->TestMode = (testModeSpec != 0);
   folderOutStream->CheckCrc = (_crcSize != 0);
 
@@ -393,6 +441,12 @@ Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
             , true, _numThreads, _memUsage_Decompress
           #endif
           );
+
+      if (folderOutStream->StopByDataCallback)
+      {
+        RINOK(folderOutStream->FlushCorrupted(NExtract::NOperationResult::kOK))
+        break;
+      }
 
       if (result == S_FALSE || result == E_NOTIMPL || dataAfterEnd_Error)
       {

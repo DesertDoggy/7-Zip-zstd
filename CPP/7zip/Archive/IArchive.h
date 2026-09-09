@@ -128,6 +128,15 @@ namespace NArchive
         kReadExternal
       };
     }
+
+    namespace NDataAction
+    {
+      enum
+      {
+        kContinue = 0,
+        kStop
+      };
+    }
   
     namespace NOperationResult
     {
@@ -258,6 +267,50 @@ Z7_IFACE_CONSTR_ARCHIVE_SUB(IArchiveExtractCallbackMessage, IProgress, 0x21)
 #define Z7_IFACEM_IArchiveExtractCallbackMessage2(x) \
   x(ReportExtractResult(UInt32 indexType, UInt32 index, Int32 opRes))
 Z7_IFACE_CONSTR_ARCHIVE(IArchiveExtractCallbackMessage2, 0x22)
+
+
+/*
+IArchiveExtractCallbackData2 is optional interface for stream consumers.
+Extract() can request it from IArchiveExtractCallback object.
+
+OnData()
+  index - item index in archive.
+  offsetInFile - offset in unpacked file for current data block.
+  data, size - unpacked bytes for current item.
+  askExtractMode - NExtract::NAskMode value for that item.
+  action - input/output value from NExtract::NDataAction.
+
+returns:
+  S_OK - continue extraction
+  another value - extraction error
+*/
+
+#define Z7_IFACEM_IArchiveExtractCallbackData2(x) \
+  x(OnData(UInt32 index, UInt64 offsetInFile, const void *data, UInt32 size, Int32 askExtractMode, Int32 *action))
+Z7_IFACE_CONSTR_ARCHIVE(IArchiveExtractCallbackData2, 0x23)
+
+
+/*
+IArchiveExtractCallbackDataFile2 is optional interface for file-level boundaries.
+It can be used together with IArchiveExtractCallbackData2 to simplify per-file
+hash state lifecycle in multi-file archives.
+
+OnFileBegin()
+  index - item index in archive.
+  unpackSize - unpacked file size.
+  askExtractMode - NExtract::NAskMode value for that item.
+  action - input/output NExtract::NDataAction value.
+
+OnFileEnd()
+  index - item index in archive.
+  opRes - NExtract::NOperationResult value for that item.
+  askExtractMode - NExtract::NAskMode value for that item.
+*/
+
+#define Z7_IFACEM_IArchiveExtractCallbackDataFile2(x) \
+  x(OnFileBegin(UInt32 index, UInt64 unpackSize, Int32 askExtractMode, Int32 *action)) \
+  x(OnFileEnd(UInt32 index, Int32 opRes, Int32 askExtractMode))
+Z7_IFACE_CONSTR_ARCHIVE(IArchiveExtractCallbackDataFile2, 0x24)
 
 #define Z7_IFACEM_IArchiveOpenVolumeCallback(x) \
   x(GetProperty(PROPID propID, PROPVARIANT *value)) \

@@ -23,12 +23,14 @@
 4. Phase 4: Streaming extraction hook (main app minimal adjustment)
 1. 展開データの主要経路にチャンク通知フックを追加する。
 2. チャンク契約は `data, size, fileIndex, offsetInFile, context` を基本形とする。
-3. 保存なしモード（hash-only）でも同一チャンク通知を利用できるようにする。
-4. 7-Zip-zstd 本体ではハッシュ本体実装を持たず、外部プロジェクトへチャンクを渡す責務に限定する。
+3. ファイル境界契約として `OnFileBegin/OnFileEnd` を追加し、外部ハッシャーが file 単位で状態管理できるようにする。
+4. 複数ファイルアーカイブでは `fileIndex` ごとに独立ストリームとして扱えることを保証する。
+5. 保存なしモード（hash-only）でも同一チャンク通知を利用できるようにする。
+6. 7-Zip-zstd 本体ではハッシュ本体実装を持たず、外部プロジェクトへチャンクを渡す責務に限定する。
 
 5. Phase 5: Partial-content and early-stop behavior
 1. 先頭 N バイトや `offset-length` 指定で必要範囲のみ取得できる契約を用意する。
-2. 必要量到達時の停止を「異常終了ではない終了理由」として扱う。
+2. 必要量到達時の停止を `OnFileBegin` または `OnData` で要求できるようにする。
 3. 既存の展開エラー系終了と区別し、ログに `complete/partial/error` を明記する。
 4. file 単位選択（indices）と file 内範囲指定を分離し、不要データの流出を抑える。
 
@@ -37,6 +39,7 @@
 2. チャンクサイズは可変でよい前提とし、アルゴリズム側の内部バッファ処理に委ねる。
 3. XXH3 は streaming state API を前提にし、state 管理は外部ハッシュ側責務とする。
 4. solid archive では対象位置より前段の展開が必要な場合がある点を制約として明記する。
+5. ファイルごとのハッシュ確定タイミング（開始・更新・終了）を `fileIndex` 単位で仕様化する。
 
 7. Phase 7: User-scoped wrappers, docs, logs, and tests
 1. 実行入口スクリプトを `user/scripts` に置き、依存パス解決と実行モード（extract/hash-only/partial）を一本化する。
@@ -53,3 +56,4 @@
 6. テストコード・テストデータ・テスト出力が `user/tests` 配下にあることを確認する。
 7. `user` 以外に新規補助ファイルや生成物を作っていないことを確認する。
 8. 本体ソース変更が最小差分にとどまっていることを確認する。
+9. 複数ファイルアーカイブで `fileIndex` ごとに独立したハッシュ結果が得られることを確認する。

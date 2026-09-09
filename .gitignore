@@ -13,3 +13,5 @@
 **/x86-bin
 **/x64-bin
 **/arm64-bin
+/CPP/7zip/Bundles/Alone2/_o
+*.log
