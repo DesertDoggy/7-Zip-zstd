@@ -16,3 +16,4 @@
 /CPP/7zip/Bundles/Alone2/_o
 *.log
 *.o
+.DS_Store
