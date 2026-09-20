@@ -49,6 +49,7 @@ COMMON_OBJS = \
   $O/MyMap.o \
   $O/MyString.o \
   $O/MyVector.o \
+  $O/MyWindows.o \
   $O/MyXml.o \
   $O/NewHandler.o \
   $O/Sha1Prepare.o \

@@ -2,10 +2,8 @@
 *.obj
 *.exe
 *.res
-*.dll
 *.pch
 *.exp
-*.lib
 *.sfx
 
 # Folders
@@ -17,3 +15,6 @@
 *.log
 *.o
 .DS_Store
+/user/deps
+user/deps/.DS_Store
+user/deps/zlib-ng/mac/arm64/2.3.90/.DS_Store
