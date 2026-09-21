@@ -554,7 +554,7 @@ SevenZipArchive *sevenzip_open(const char *path, SevenZipFormat format,
 
     CInFileStream *fileSpec = new CInFileStream;
     CMyComPtr<IInStream> file = fileSpec;
-    if (!fileSpec->Open(Utf8ToUString(path)))
+    if (!fileSpec->Open(us2fs(Utf8ToUString(path))))
     {
         SetLastError("Cannot open archive file");
         return nullptr;
@@ -656,7 +656,7 @@ static int ExtractOne(SevenZipArchive *archive, int index, bool toBuffer,
     CMyComPtr<IArchiveExtractCallback> extractCallback(extractCallbackSpec);
     extractCallbackSpec->ToBuffer = toBuffer;
     if (!toBuffer)
-        extractCallbackSpec->OutFilePath = Utf8ToUString(outPath);
+        extractCallbackSpec->OutFilePath = us2fs(Utf8ToUString(outPath));
     extractCallbackSpec->OnProgress = on_progress;
     extractCallbackSpec->UserData = user_data;
 
@@ -735,7 +735,7 @@ int sevenzip_create_archive(const char *out_path, const SevenZipCreateOptions *o
     for (int i = 0; i < options->count; i++)
     {
         CDirItem di;
-        FString fullPath = Utf8ToUString(options->input_paths[i]);
+        FString fullPath = us2fs(Utf8ToUString(options->input_paths[i]));
         if (!di.Fi.Find(fullPath))
         {
             SetLastError("Cannot find input file");
@@ -748,7 +748,7 @@ int sevenzip_create_archive(const char *out_path, const SevenZipCreateOptions *o
 
     COutFileStream *outFileStreamSpec = new COutFileStream;
     CMyComPtr<IOutStream> outFileStream = outFileStreamSpec;
-    if (!outFileStreamSpec->Create_ALWAYS(Utf8ToUString(out_path)))
+    if (!outFileStreamSpec->Create_ALWAYS(us2fs(Utf8ToUString(out_path))))
     {
         SetLastError("Cannot create output archive file");
         return -1;

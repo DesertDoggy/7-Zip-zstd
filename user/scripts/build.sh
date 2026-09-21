@@ -66,20 +66,20 @@ case "$arch" in
     arch_flags=(IS_ARM64=1)
     ;;
   x64|x86_64)
-    # These specific object files (Sha1Opt/Sha256Opt/Sha512Opt/7zCrcOpt/XzCrc64Opt) are
-    # MASM-family hand-tuned x86_64 asm, gated behind USE_ASM in 7zip_gcc.mak -- same
-    # asm dependency build.sh already solved. uasm before asmc: verified directly (see
-    # build.sh's own history) that asmc fails to assemble Sha1Opt.asm's SHA1RNDS4
-    # macro while uasm handles the same file cleanly.
-    asm_tool=""
-    if [[ "$platform" == "windows" || "$platform" == "linux" ]]; then
+    if [[ "$platform" == "windows" ]]; then
+      # These specific object files (Sha1Opt/Sha256Opt/Sha512Opt/7zCrcOpt/XzCrc64Opt) are
+      # MASM-family hand-tuned x86_64 asm, gated behind USE_ASM in 7zip_gcc.mak -- same
+      # asm dependency build.sh already solved. uasm before asmc: verified directly (see
+      # build.sh's own history) that asmc fails to assemble Sha1Opt.asm's SHA1RNDS4
+      # macro while uasm handles the same file cleanly.
+      asm_tool=""
       for candidate in uasm uasm64 UASM UASM64 jwasm jwasm64 asmc asmc64 ml64; do
         if command -v "$candidate" >/dev/null 2>&1; then
           asm_tool="$candidate"
           break
         fi
       done
-      if [[ -z "$asm_tool" && "$platform" == "windows" ]]; then
+      if [[ -z "$asm_tool" ]]; then
         for fixed_path in /c/uasm/uasm64.exe /c/uasm/uasm.exe \
           "/c/Program Files/uasm/uasm64.exe" "/c/Program Files/uasm/uasm.exe" \
           /c/jwasm/jwasm.exe \
@@ -90,21 +90,37 @@ case "$arch" in
           fi
         done
       fi
-    fi
-    if [[ -n "$asm_tool" ]]; then
-      arch_flags=(IS_X64=1 USE_ASM=1 "MY_ASM=$asm_tool")
-      if [[ "$platform" == "windows" ]]; then
-        arch_flags+=("AFLAGS_ABI=-win64 -c")
-      elif [[ "$platform" == "linux" ]]; then
-        arch_flags+=("AFLAGS_ABI=-elf64 -DABI_LINUX -c")
+      if [[ -n "$asm_tool" ]]; then
+        arch_flags=(IS_X64=1 USE_ASM=1 "MY_ASM=$asm_tool" "AFLAGS_ABI=-win64 -c")
+      else
+        echo "[WARN] No MASM-compatible assembler (uasm/asmc/jwasm/ml64) found in PATH or under C:\\uasm/C:\\asmc." >&2
+        echo "[WARN] Building without hand-tuned x86_64 ASM; functionally identical, just C fallback for those routines." >&2
+        arch_flags=(IS_X64=1)
+      fi
+    elif [[ "$platform" == "linux" ]]; then
+      # Linux only needs LzmaDecOpt.asm -- hashing (Sha1/Sha256/CrcOpt) goes through
+      # Rust crates, not this library, and AesOpt.asm isn't needed either. LzmaDecOpt
+      # is gated independently via USE_LZMA_DEC_ASM (decoupled from USE_ASM, which
+      # would also pull in Sha1Opt/Sha256Opt/AesOpt/CrcOpt). jwasm verified clean on
+      # LzmaDecOpt.asm; asmc has a confirmed evaluator bug on Sha1Opt.asm's SHA1RNDS4
+      # macro (irrelevant here since USE_ASM stays unset), and jwasm separately lacks
+      # the AES-NI/AVX2 opcodes AesOpt.asm needs (also irrelevant here).
+      asm_tool=""
+      for candidate in jwasm jwasm64 uasm uasm64; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+          asm_tool="$candidate"
+          break
+        fi
+      done
+      if [[ -n "$asm_tool" ]]; then
+        arch_flags=(IS_X64=1 USE_LZMA_DEC_ASM=1 "MY_ASM=$asm_tool" "AFLAGS_ABI=-elf64 -DABI_LINUX -c")
+      else
+        echo "[WARN] No MASM-compatible assembler (jwasm/uasm) found in PATH." >&2
+        echo "[WARN] Building without hand-tuned LzmaDecOpt ASM; functionally identical, just C fallback." >&2
+        arch_flags=(IS_X64=1)
       fi
     else
-      if [[ "$platform" == "mac" ]]; then
-        echo "[INFO] ASM not supported for mac in this makefile (no Mach-O AFLAGS_ABI branch); using C fallback." >&2
-      else
-        echo "[WARN] No MASM-compatible assembler (uasm/asmc/jwasm/ml64) found in PATH${platform:+ or under C:\\uasm/C:\\asmc}." >&2
-        echo "[WARN] Building without hand-tuned x86_64 ASM; functionally identical, just C fallback for those routines." >&2
-      fi
+      echo "[INFO] ASM not supported for mac in this makefile (no Mach-O AFLAGS_ABI branch); using C fallback." >&2
       arch_flags=(IS_X64=1)
     fi
     ;;
