@@ -127,6 +127,45 @@ SEVENZIP_API int sevenzip_extract_entry_to_buffer(SevenZipArchive* archive, int 
 /* Releases a buffer returned by sevenzip_extract_entry_to_buffer. Safe to call with NULL. */
 SEVENZIP_API void sevenzip_free_buffer(uint8_t* data);
 
+#ifdef SEVENZIP_WITH_STREAMING
+/* ---------------------------------------------------------------------------
+ * Streaming extraction (only in a library built with SEVENZIP_WITH_STREAMING --
+ * see user/scripts/build.sh --streaming, which builds to
+ * user/release/with_streaming/<platform>/<arch>/<version>/). The default build
+ * exports none of the symbols below, so a caller resolving them dynamically can
+ * use their presence to detect a streaming-capable library.
+ * --------------------------------------------------------------------------- */
+
+/* Called with each chunk of an entry's decompressed bytes as 7-Zip produces it,
+ * before the data is discarded. `entry_index` is the archive entry the chunk
+ * belongs to (the same index sevenzip_get_entry takes), so a caller extracting
+ * several entries can route chunks to the right per-file hasher/writer.
+ * `offset_in_entry` is the running byte offset within that entry, starting at 0.
+ *
+ * Return 0 to stop the extraction (reported as the "Cancelled" code, -6), nonzero
+ * to continue -- matching SevenZipProgressCb's convention. May be NULL, in which
+ * case sevenzip_extract_entry_stream behaves like the non-streaming call. */
+typedef int (*SevenZipDataCb)(uint32_t entry_index, uint64_t offset_in_entry,
+                              const void* data, uint32_t size, void* user_data);
+
+/* Extracts entry `index`, handing every decompressed chunk to on_data as it is
+ * produced rather than only after the whole entry has been written.
+ *
+ * If out_path is non-NULL the entry is ALSO written there, exactly as
+ * sevenzip_extract_entry_to_file would -- one decompression pass feeds both the
+ * file and the callback, so hashing while extracting costs no second read.
+ * If out_path is NULL nothing is written to disk: the bytes reach on_data and are
+ * then discarded, for hashing an entry without materializing it.
+ *
+ * Returns 0 on success, negative on failure (-6 if on_data or on_progress asked to
+ * stop) -- see sevenzip_get_last_error(). */
+SEVENZIP_API int sevenzip_extract_entry_stream(SevenZipArchive* archive, int index,
+                                                 const char* out_path,
+                                                 SevenZipDataCb on_data,
+                                                 SevenZipProgressCb on_progress,
+                                                 void* user_data);
+#endif /* SEVENZIP_WITH_STREAMING */
+
 typedef struct SevenZipCreateOptions
 {
     /* Required. Container format to write. */

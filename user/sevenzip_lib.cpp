@@ -253,6 +253,77 @@ Z7_COM7F_IMF(CMemOutStream::Write(const void *data, UInt32 size, UInt32 *process
     return S_OK;
 }
 
+#ifdef SEVENZIP_WITH_STREAMING
+
+// ---------------------------------------------------------------------------
+// Pass-through ISequentialOutStream that hands each decompressed chunk to a C
+// callback as 7-Zip produces it, optionally forwarding the same bytes to a real
+// inner stream (the output file). With no inner stream nothing reaches disk: the
+// bytes are seen by the callback and then dropped.
+//
+// Same wrap-and-observe shape as 7-Zip's own COutStreamWithCRC
+// (CPP/7zip/Archive/Common/OutStreamWithCRC.h), and it honors the same partial-write
+// contract (IStream.h: *processedSize <= size): the inner stream is written first and
+// only the bytes it actually accepted are handed to the callback, so the callback
+// never sees bytes that failed to reach disk.
+//
+// Deliberately implemented here rather than via the IArchiveExtractCallbackData2
+// hook in CPP/7zip/Archive/IArchive.h: that hook is wired into the 7z handler only
+// (CPP/7zip/Archive/7z/7zExtract.cpp), whereas wrapping the stream this callback
+// already hands out works identically for 7z and zip and touches no vendored code.
+// ---------------------------------------------------------------------------
+
+class CTapOutStream Z7_final: public ISequentialOutStream, public CMyUnknownImp
+{
+    Z7_IFACES_IMP_UNK_1(ISequentialOutStream)
+public:
+    /// Real sink for the bytes, or null to discard them after the callback sees them.
+    CMyComPtr<ISequentialOutStream> Inner;
+    SevenZipDataCb OnData;
+    void *UserData;
+    /// Archive entry these chunks belong to, so the consumer can route them per file.
+    UInt32 EntryIndex;
+    /// Running offset within this entry.
+    UInt64 Offset;
+    /// Points at the owning CArchiveExtractCallback's flag, which outlives this stream
+    /// (this object dies when the callback releases its CMyComPtr, so the "did the
+    /// callback ask to stop" answer cannot live here).
+    bool *StopFlag;
+
+    CTapOutStream():
+        OnData(nullptr), UserData(nullptr), EntryIndex(0), Offset(0), StopFlag(nullptr) {}
+};
+
+Z7_COM7F_IMF(CTapOutStream::Write(const void *data, UInt32 size, UInt32 *processedSize))
+{
+    if (processedSize)
+        *processedSize = 0;
+
+    UInt32 written = size;
+    if (Inner)
+    {
+        written = 0;
+        RINOK(Inner->Write(data, size, &written))
+    }
+
+    if (written != 0 && OnData)
+    {
+        if (!OnData(EntryIndex, Offset, data, written, UserData))
+        {
+            if (StopFlag)
+                *StopFlag = true;
+            return E_ABORT;
+        }
+    }
+
+    Offset += written;
+    if (processedSize)
+        *processedSize = written;
+    return S_OK;
+}
+
+#endif // SEVENZIP_WITH_STREAMING
+
 // ---------------------------------------------------------------------------
 // Extract callback -- always targets exactly one archive index (the caller-requested
 // one), writing either to a fixed output file path or into a CMemOutStream, selected
@@ -281,10 +352,25 @@ public:
     COutFileStream *_outFileStreamSpec;
     CMyComPtr<ISequentialOutStream> _outStream;
 
+#ifdef SEVENZIP_WITH_STREAMING
+    /// When set, every decompressed chunk is handed to this as 7-Zip produces it.
+    SevenZipDataCb OnData;
+    void *DataUserData;
+    /// Suppress the output file entirely -- stream the bytes and discard them.
+    bool StreamOnly;
+    /// Set by CTapOutStream when OnData asked to stop (see CTapOutStream::StopFlag).
+    bool DataStopped;
+#endif
+
+    // Initializer order follows declaration order (-Wreorder is an error here).
     CArchiveExtractCallback():
         ToBuffer(false), MemStreamSpec(nullptr), Total(0),
         OnProgress(nullptr), UserData(nullptr), Cancelled(false), Failed(false),
-        _outFileStreamSpec(nullptr) {}
+        _outFileStreamSpec(nullptr)
+#ifdef SEVENZIP_WITH_STREAMING
+        , OnData(nullptr), DataUserData(nullptr), StreamOnly(false), DataStopped(false)
+#endif
+        {}
 };
 
 Z7_COM7F_IMF(CArchiveExtractCallback::SetTotal(UInt64 size))
@@ -309,14 +395,32 @@ Z7_COM7F_IMF(CArchiveExtractCallback::SetCompleted(const UInt64 *completeValue))
     return S_OK;
 }
 
-Z7_COM7F_IMF(CArchiveExtractCallback::GetStream(UInt32 /* index */,
+Z7_COM7F_IMF(CArchiveExtractCallback::GetStream(UInt32 index,
     ISequentialOutStream **outStream, Int32 askExtractMode))
 {
+    (void)index; // only the streaming build routes chunks per entry
     *outStream = nullptr;
     _outStream.Release();
 
     if (askExtractMode != NArchive::NExtract::NAskMode::kExtract)
         return S_OK;
+
+#ifdef SEVENZIP_WITH_STREAMING
+    if (StreamOnly && !ToBuffer)
+    {
+        // No output file at all: the tap is the only sink, so bytes reach OnData and
+        // are then dropped.
+        CTapOutStream *tapSpec = new CTapOutStream();
+        CMyComPtr<ISequentialOutStream> tapLoc(tapSpec);
+        tapSpec->OnData = OnData;
+        tapSpec->UserData = DataUserData;
+        tapSpec->EntryIndex = index;
+        tapSpec->StopFlag = &DataStopped;
+        _outStream = tapLoc;
+        *outStream = tapLoc.Detach();
+        return S_OK;
+    }
+#endif
 
     if (ToBuffer)
     {
@@ -347,6 +451,24 @@ Z7_COM7F_IMF(CArchiveExtractCallback::GetStream(UInt32 /* index */,
         SetLastError("Cannot create output file");
         return E_ABORT;
     }
+
+#ifdef SEVENZIP_WITH_STREAMING
+    if (OnData)
+    {
+        // One decompression pass feeds both the output file and the callback.
+        CTapOutStream *tapSpec = new CTapOutStream();
+        CMyComPtr<ISequentialOutStream> tapLoc(tapSpec);
+        tapSpec->Inner = streamLoc;
+        tapSpec->OnData = OnData;
+        tapSpec->UserData = DataUserData;
+        tapSpec->EntryIndex = index;
+        tapSpec->StopFlag = &DataStopped;
+        _outStream = tapLoc;
+        *outStream = tapLoc.Detach();
+        return S_OK;
+    }
+#endif
+
     _outStream = streamLoc;
     *outStream = streamLoc.Detach();
     return S_OK;
@@ -644,7 +766,11 @@ int sevenzip_get_entry(SevenZipArchive *archive, int index, SevenZipEntry *out_e
 
 static int ExtractOne(SevenZipArchive *archive, int index, bool toBuffer,
                        const char *outPath, uint8_t **outData, size_t *outLen,
-                       SevenZipProgressCb on_progress, void *user_data)
+                       SevenZipProgressCb on_progress, void *user_data
+#ifdef SEVENZIP_WITH_STREAMING
+                       , SevenZipDataCb on_data = nullptr, bool streamOnly = false
+#endif
+                       )
 {
     if (!archive || index < 0 || (size_t)index >= archive->Entries.size())
     {
@@ -655,10 +781,15 @@ static int ExtractOne(SevenZipArchive *archive, int index, bool toBuffer,
     CArchiveExtractCallback *extractCallbackSpec = new CArchiveExtractCallback();
     CMyComPtr<IArchiveExtractCallback> extractCallback(extractCallbackSpec);
     extractCallbackSpec->ToBuffer = toBuffer;
-    if (!toBuffer)
+    if (!toBuffer && outPath)
         extractCallbackSpec->OutFilePath = us2fs(Utf8ToUString(outPath));
     extractCallbackSpec->OnProgress = on_progress;
     extractCallbackSpec->UserData = user_data;
+#ifdef SEVENZIP_WITH_STREAMING
+    extractCallbackSpec->OnData = on_data;
+    extractCallbackSpec->DataUserData = user_data;
+    extractCallbackSpec->StreamOnly = streamOnly;
+#endif
 
     const UInt32 indices[1] = { (UInt32)index };
     HRESULT result = archive->Archive->Extract(indices, 1, false, extractCallback);
@@ -668,6 +799,13 @@ static int ExtractOne(SevenZipArchive *archive, int index, bool toBuffer,
         SetLastError("Cancelled");
         return -6;
     }
+#ifdef SEVENZIP_WITH_STREAMING
+    if (extractCallbackSpec->DataStopped)
+    {
+        SetLastError("Stopped by data callback");
+        return -6;
+    }
+#endif
     if (result != S_OK)
     {
         SetLastErrorHR("Extract failed", result);
@@ -711,6 +849,19 @@ int sevenzip_extract_entry_to_buffer(SevenZipArchive *archive, int index,
 {
     return ExtractOne(archive, index, true, nullptr, out_data, out_len, on_progress, user_data);
 }
+
+#ifdef SEVENZIP_WITH_STREAMING
+int sevenzip_extract_entry_stream(SevenZipArchive *archive, int index, const char *out_path,
+                                    SevenZipDataCb on_data, SevenZipProgressCb on_progress,
+                                    void *user_data)
+{
+    // out_path == NULL means "stream only": no file is created, so the decompressed bytes
+    // reach on_data and are then dropped.
+    const bool streamOnly = (out_path == nullptr);
+    return ExtractOne(archive, index, false, out_path, nullptr, nullptr, on_progress, user_data,
+                      on_data, streamOnly);
+}
+#endif
 
 void sevenzip_free_buffer(uint8_t *data)
 {

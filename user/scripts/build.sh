@@ -10,9 +10,27 @@ set -euo pipefail
 # Usage:
 #   user/scripts/build_sevenzip_lib.sh                 # auto-detect platform/arch
 #   user/scripts/build_sevenzip_lib.sh <platform> <arch>
+#   user/scripts/build_sevenzip_lib.sh [--streaming] [<platform> <arch>]
+#
+# --streaming builds the streaming-capable variant (-DSEVENZIP_WITH_STREAMING, which
+# compiles in sevenzip_extract_entry_stream -- see user/sevenzip_lib.h) into
+# user/release/with_streaming/<platform>/<arch>/<version>/ instead of
+# user/release/<platform>/<arch>/<version>/. Both variants can coexist: the default
+# build's sources, flags, export list and output path are untouched by this flag, so
+# the two can be built from the same commit and benchmarked against each other.
+
+streaming=0
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --streaming) streaming=1 ;;
+    *) args+=("$arg") ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
 
 if [[ $# -ne 0 && $# -ne 2 ]]; then
-  echo "[ERROR] Usage: $0  OR  $0 <platform> <arch>" >&2
+  echo "[ERROR] Usage: $0 [--streaming]  OR  $0 [--streaming] <platform> <arch>" >&2
   exit 2
 fi
 
@@ -54,7 +72,11 @@ output_version="$(git -C "$repo_root" describe --tags 2>/dev/null || echo dev)"
 build_dir="$(mktemp -d /tmp/sevenzip_build.XXXXXX)"
 trap 'rm -rf "$build_dir"' EXIT
 
-out_dir="$user_dir/release/$platform/$arch/$output_version"
+if (( streaming )); then
+  out_dir="$user_dir/release/with_streaming/$platform/$arch/$output_version"
+else
+  out_dir="$user_dir/release/$platform/$arch/$output_version"
+fi
 mkdir -p "$build_dir" "$out_dir"
 
 arch_flags=()
@@ -139,6 +161,14 @@ if [[ "$platform" == "windows" ]] && command -v cygpath >/dev/null 2>&1; then
 fi
 
 make_vars=("O=$o_value")
+if (( streaming )); then
+  # CXXFLAGS_EXTRA is an unassigned hook in 7zip_gcc.mak, so a command-line assignment
+  # is the whole change; the streaming .def adds the one new export (listing it in the
+  # default sevenzip_lib.def would break that build's link, since the symbol isn't
+  # compiled there).
+  make_vars+=("CXXFLAGS_EXTRA=-DSEVENZIP_WITH_STREAMING")
+  make_vars+=("DEF_FILE=../../../../user/sevenzip_lib_streaming.def")
+fi
 if [[ "$platform" == "windows" ]]; then
   # See build.sh's own history: needed because C/fast-lzma2/util.c's Windows
   # CPU-count detection casts GetProcAddress()'s FARPROC to a specific function
@@ -149,7 +179,7 @@ if [[ "$platform" == "windows" ]]; then
 fi
 
 {
-  echo "[INFO] platform=$platform arch=$arch output_version=$output_version"
+  echo "[INFO] platform=$platform arch=$arch output_version=$output_version streaming=$streaming"
   echo "[INFO] make_dir=$make_dir"
   echo "[INFO] build_dir=$build_dir"
   echo "[INFO] out_dir=$out_dir"
