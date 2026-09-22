@@ -1,5 +1,5 @@
 ; Exports for the streaming build (build.sh --streaming, i.e. -DSEVENZIP_WITH_STREAMING).
-; Identical to sevenzip_lib.def plus sevenzip_extract_entry_stream. Kept as a separate
+; Identical to sevenzip_lib.def plus the streaming entry points. Kept as a separate
 ; file so the default build's export list stays exactly as it is -- listing a symbol the
 ; default build doesn't compile would break the MinGW link.
 EXPORTS
@@ -13,3 +13,9 @@ EXPORTS
   sevenzip_free_buffer PRIVATE
   sevenzip_create_archive PRIVATE
   sevenzip_get_last_error PRIVATE
+  sevenzip_create_archive_from_sources PRIVATE
+  sevenzip_entry_reader_open PRIVATE
+  sevenzip_entry_reader_size PRIVATE
+  sevenzip_entry_reader_read PRIVATE
+  sevenzip_entry_reader_read_at PRIVATE
+  sevenzip_entry_reader_close PRIVATE

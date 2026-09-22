@@ -202,6 +202,67 @@ typedef struct SevenZipCreateOptions
  */
 SEVENZIP_API int sevenzip_create_archive(const char* out_path, const SevenZipCreateOptions* options);
 
+#ifdef SEVENZIP_WITH_STREAMING
+/* ---------------------------------------------------------------------------
+ * Streaming build only: archive creation from caller-supplied sources, and pull-style
+ * (sequential + random access) reading of one entry.
+ * --------------------------------------------------------------------------- */
+
+/*
+ * One archive member whose bytes come from the caller instead of a file. Give `read`
+ * (sequential), `read_at` (random access), or both; with both, `read` is used.
+ *
+ *   read:    copy up to `size` next bytes into buf; return the count (0 = end), <0 = error.
+ *   read_at: copy exactly `size` bytes at `offset` into buf; return 0, nonzero = error.
+ *
+ * Either way exactly `size` bytes (the field) are consumed, from offset 0 upward --
+ * 7-Zip reads its input strictly forward. Calls happen on the thread that called
+ * sevenzip_create_archive_from_sources.
+ */
+typedef struct SevenZipSource
+{
+    const char* archive_name;  /* path inside the archive, '/'-separated */
+    uint64_t size;             /* exact byte count */
+    uint64_t mtime_filetime;   /* Windows FILETIME (100 ns since 1601); 0 = now */
+    int64_t (*read)(void* user_data, void* buf, uint64_t size);
+    int (*read_at)(void* user_data, uint64_t offset, void* buf, uint64_t size);
+    void* user_data;
+} SevenZipSource;
+
+/*
+ * sevenzip_create_archive, with members from `sources` instead of files. format, method,
+ * level, on_progress and user_data come from *options; its input_paths / archive_names /
+ * count are ignored. Non-solid, like sevenzip_create_archive. Returns 0, -6 if
+ * on_progress cancelled, other negatives on failure (a source error included).
+ */
+SEVENZIP_API int sevenzip_create_archive_from_sources(const char* out_path,
+                                                      const SevenZipCreateOptions* options,
+                                                      const SevenZipSource* sources, int count);
+
+/*
+ * Pull-style reader for one entry, opening its own handle on the archive (so readers are
+ * independent of each other and of any SevenZipArchive, and may run on separate threads).
+ * Decoding runs on a background thread into a bounded buffer.
+ *
+ *   read:    sequential; returns bytes copied (0 = end of entry), <0 = error.
+ *   read_at: random access. zip/7z data is a forward-only compressed stream, so this is
+ *            emulated: a forward seek decodes and discards up to `offset`, a backward seek
+ *            restarts decoding from the entry's start. Cost is O(offset), not O(1).
+ *
+ * A single reader is not thread-safe.
+ */
+typedef struct SevenZipEntryReader SevenZipEntryReader;
+
+SEVENZIP_API SevenZipEntryReader* sevenzip_entry_reader_open(const char* archive_path,
+                                                            SevenZipFormat format, int index);
+SEVENZIP_API uint64_t sevenzip_entry_reader_size(SevenZipEntryReader* reader);
+SEVENZIP_API int64_t sevenzip_entry_reader_read(SevenZipEntryReader* reader, void* buf,
+                                                uint64_t size);
+SEVENZIP_API int sevenzip_entry_reader_read_at(SevenZipEntryReader* reader, uint64_t offset,
+                                               void* buf, uint64_t size);
+SEVENZIP_API void sevenzip_entry_reader_close(SevenZipEntryReader* reader);
+#endif /* SEVENZIP_WITH_STREAMING */
+
 /* Message for the most recent failed call on this thread (sevenzip_open,
  * sevenzip_extract_entry_to_file/buffer, or sevenzip_create_archive). */
 SEVENZIP_API const char* sevenzip_get_last_error(void);

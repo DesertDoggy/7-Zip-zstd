@@ -44,6 +44,14 @@
 #include <string>
 #include <vector>
 
+#ifdef SEVENZIP_WITH_STREAMING
+#include <condition_variable>
+#include <ctime>
+#include <deque>
+#include <mutex>
+#include <thread>
+#endif
+
 using namespace NWindows;
 using namespace NFile;
 using namespace NDir;
@@ -520,7 +528,76 @@ struct CDirItem
     UString PathForHandler;
     FString FullPath;
     NFind::CFileInfo Fi;
+#ifdef SEVENZIP_WITH_STREAMING
+    // Non-null: the member's bytes come from this caller source, not FullPath.
+    const SevenZipSource *Source = nullptr;
+#endif
 };
+
+#ifdef SEVENZIP_WITH_STREAMING
+// ISequentialInStream over a SevenZipSource: its `read`, or `read_at` driven by a cursor.
+// Never yields more than the source's declared size.
+class CSourceInStream Z7_final:
+    public ISequentialInStream,
+    public CMyUnknownImp
+{
+    Z7_IFACES_IMP_UNK_1(ISequentialInStream)
+public:
+    const SevenZipSource *Source = nullptr;
+    UInt64 Pos = 0;
+};
+
+Z7_COM7F_IMF(CSourceInStream::Read(void *data, UInt32 size, UInt32 *processedSize))
+{
+    if (processedSize)
+        *processedSize = 0;
+    const UInt64 remaining = Source->size - Pos;
+    if (size > remaining)
+        size = (UInt32)remaining;
+    if (size == 0)
+        return S_OK;
+    UInt64 got = 0;
+    if (Source->read)
+    {
+        const int64_t n = Source->read(Source->user_data, data, size);
+        if (n < 0 || (UInt64)n > size)
+        {
+            SetLastError("Source read failed");
+            return E_FAIL;
+        }
+        got = (UInt64)n;
+        if (got == 0)
+        {
+            SetLastError("Source ended before its declared size");
+            return E_FAIL;
+        }
+    }
+    else
+    {
+        if (Source->read_at(Source->user_data, Pos, data, size) != 0)
+        {
+            SetLastError("Source read_at failed");
+            return E_FAIL;
+        }
+        got = size;
+    }
+    Pos += got;
+    if (processedSize)
+        *processedSize = (UInt32)got;
+    return S_OK;
+}
+
+static FILETIME SourceMTime(const SevenZipSource &source)
+{
+    UInt64 ft = source.mtime_filetime;
+    if (ft == 0)
+        ft = ((UInt64)std::time(nullptr) + 11644473600ULL) * 10000000ULL;
+    FILETIME result;
+    result.dwLowDateTime = (DWORD)ft;
+    result.dwHighDateTime = (DWORD)(ft >> 32);
+    return result;
+}
+#endif
 
 class CArchiveUpdateCallback Z7_final:
     public IArchiveUpdateCallback2,
@@ -582,6 +659,22 @@ Z7_COM7F_IMF(CArchiveUpdateCallback::GetProperty(UInt32 index, PROPID propID, PR
     else
     {
         const CDirItem &di = (*DirItems)[index];
+#ifdef SEVENZIP_WITH_STREAMING
+        if (di.Source)
+        {
+            switch (propID)
+            {
+                case kpidPath: prop = di.PathForHandler; break;
+                case kpidIsDir: prop = false; break;
+                case kpidSize: prop = (UInt64)di.Source->size; break;
+                case kpidAttrib: prop = (UInt32)FILE_ATTRIBUTE_ARCHIVE; break;
+                case kpidMTime: prop = SourceMTime(*di.Source); break;
+                default: break;
+            }
+            prop.Detach(value);
+            return S_OK;
+        }
+#endif
         switch (propID)
         {
             case kpidPath: prop = di.PathForHandler; break;
@@ -601,6 +694,16 @@ Z7_COM7F_IMF(CArchiveUpdateCallback::GetProperty(UInt32 index, PROPID propID, PR
 Z7_COM7F_IMF(CArchiveUpdateCallback::GetStream(UInt32 index, ISequentialInStream **inStream))
 {
     const CDirItem &di = (*DirItems)[index];
+#ifdef SEVENZIP_WITH_STREAMING
+    if (di.Source)
+    {
+        CSourceInStream *spec = new CSourceInStream;
+        CMyComPtr<ISequentialInStream> loc(spec);
+        spec->Source = di.Source;
+        *inStream = loc.Detach();
+        return S_OK;
+    }
+#endif
     if (di.Fi.IsDir())
         return S_OK;
 
@@ -868,6 +971,9 @@ void sevenzip_free_buffer(uint8_t *data)
     free(data);
 }
 
+static int CreateArchiveImpl(const char *out_path, const SevenZipCreateOptions *options,
+                             const std::vector<CDirItem> &dirItems);
+
 int sevenzip_create_archive(const char *out_path, const SevenZipCreateOptions *options)
 {
     if (!options || options->count <= 0 || !options->input_paths || !options->archive_names)
@@ -896,7 +1002,12 @@ int sevenzip_create_archive(const char *out_path, const SevenZipCreateOptions *o
         di.PathForHandler = Utf8ToUString(options->archive_names[i]);
         dirItems.push_back(di);
     }
+    return CreateArchiveImpl(out_path, options, dirItems);
+}
 
+static int CreateArchiveImpl(const char *out_path, const SevenZipCreateOptions *options,
+                             const std::vector<CDirItem> &dirItems)
+{
     COutFileStream *outFileStreamSpec = new COutFileStream;
     CMyComPtr<IOutStream> outFileStream = outFileStreamSpec;
     if (!outFileStreamSpec->Create_ALWAYS(us2fs(Utf8ToUString(out_path))))
@@ -968,3 +1079,227 @@ int sevenzip_create_archive(const char *out_path, const SevenZipCreateOptions *o
 
     return 0;
 }
+
+#ifdef SEVENZIP_WITH_STREAMING
+int sevenzip_create_archive_from_sources(const char *out_path, const SevenZipCreateOptions *options,
+                                         const SevenZipSource *sources, int count)
+{
+    if (!options || !sources || count <= 0 || !out_path)
+    {
+        SetLastError("Invalid create options");
+        return -1;
+    }
+    if (options->format == SEVENZIP_FORMAT_ZIP && options->method == SEVENZIP_METHOD_LZMA2)
+    {
+        SetLastError("LZMA2 is only valid for the 7z format, not ZIP");
+        return -1;
+    }
+    std::vector<CDirItem> dirItems((size_t)count);
+    for (int i = 0; i < count; i++)
+    {
+        const SevenZipSource &src = sources[i];
+        if (!src.archive_name || (!src.read && !src.read_at))
+        {
+            SetLastError("Source needs archive_name and read or read_at");
+            return -1;
+        }
+        dirItems[(size_t)i].PathForHandler = Utf8ToUString(src.archive_name);
+        dirItems[(size_t)i].Source = &src;
+    }
+    return CreateArchiveImpl(out_path, options, dirItems);
+}
+
+// ---------------------------------------------------------------------------
+// Entry reader: sevenzip_extract_entry_stream on a worker thread, feeding a bounded pipe.
+// ---------------------------------------------------------------------------
+
+struct SevenZipEntryReader
+{
+    SevenZipArchive *archive = nullptr;
+    int index = 0;
+    uint64_t size = 0;
+    uint64_t pos = 0;  // next byte the consumer receives
+
+    std::thread worker;
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::vector<uint8_t>> chunks;
+    size_t front_offset = 0;  // consumed bytes of chunks.front()
+    uint64_t buffered = 0;
+    bool running = false, done = false, failed = false, abort = false;
+    std::string error;
+
+    static constexpr uint64_t kCapacity = 8u << 20;
+
+    static int OnData(uint32_t, uint64_t, const void *data, uint32_t n, void *user)
+    {
+        auto *r = static_cast<SevenZipEntryReader *>(user);
+        std::unique_lock<std::mutex> lock(r->m);
+        r->cv.wait(lock, [r] { return r->abort || r->buffered < kCapacity; });
+        if (r->abort)
+            return 0;
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        r->chunks.emplace_back(p, p + n);
+        r->buffered += n;
+        r->cv.notify_all();
+        return 1;
+    }
+
+    void Start()
+    {
+        chunks.clear();
+        front_offset = 0;
+        buffered = 0;
+        pos = 0;
+        done = failed = abort = false;
+        running = true;
+        worker = std::thread([this] {
+            const int rc = sevenzip_extract_entry_stream(archive, index, nullptr, OnData, nullptr, this);
+            std::string message = rc ? sevenzip_get_last_error() : "";
+            std::lock_guard<std::mutex> lock(m);
+            done = true;
+            failed = rc != 0 && !abort;
+            error = message;
+            cv.notify_all();
+        });
+    }
+
+    void Stop()
+    {
+        if (!running)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(m);
+            abort = true;
+            cv.notify_all();
+        }
+        worker.join();
+        running = false;
+    }
+
+    // Copies up to n bytes; 0 at the end of the entry, -1 on a decode error.
+    int64_t Pull(uint8_t *out, uint64_t n)
+    {
+        if (!running)
+            Start();
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [this] { return buffered > 0 || done; });
+        if (buffered == 0)
+        {
+            if (failed)
+            {
+                SetLastError(error.empty() ? "Decoding failed" : error.c_str());
+                return -1;
+            }
+            return 0;
+        }
+        uint64_t copied = 0;
+        while (copied < n && !chunks.empty())
+        {
+            std::vector<uint8_t> &front = chunks.front();
+            const size_t take = (size_t)std::min<uint64_t>(n - copied, front.size() - front_offset);
+            memcpy(out + copied, front.data() + front_offset, take);
+            copied += take;
+            front_offset += take;
+            if (front_offset == front.size())
+            {
+                chunks.pop_front();
+                front_offset = 0;
+            }
+        }
+        buffered -= copied;
+        pos += copied;
+        cv.notify_all();
+        return (int64_t)copied;
+    }
+};
+
+SevenZipEntryReader *sevenzip_entry_reader_open(const char *archive_path, SevenZipFormat format, int index)
+{
+    SevenZipArchive *archive = sevenzip_open(archive_path, format, nullptr, nullptr);
+    if (!archive)
+        return nullptr;
+    SevenZipEntry entry;
+    memset(&entry, 0, sizeof entry);
+    if (sevenzip_get_entry(archive, index, &entry) != 0 || entry.is_dir)
+    {
+        if (entry.is_dir)
+            SetLastError("Entry is a directory");
+        sevenzip_close(archive);
+        return nullptr;
+    }
+    auto *r = new SevenZipEntryReader;
+    r->archive = archive;
+    r->index = index;
+    r->size = entry.size;
+    return r;
+}
+
+uint64_t sevenzip_entry_reader_size(SevenZipEntryReader *reader)
+{
+    return reader ? reader->size : 0;
+}
+
+int64_t sevenzip_entry_reader_read(SevenZipEntryReader *reader, void *buf, uint64_t size)
+{
+    if (!reader || (!buf && size))
+    {
+        SetLastError("NULL argument");
+        return -1;
+    }
+    return size ? reader->Pull(static_cast<uint8_t *>(buf), size) : 0;
+}
+
+int sevenzip_entry_reader_read_at(SevenZipEntryReader *reader, uint64_t offset, void *buf, uint64_t size)
+{
+    if (!reader || (!buf && size))
+    {
+        SetLastError("NULL argument");
+        return -1;
+    }
+    if (offset > reader->size || size > reader->size - offset)
+    {
+        SetLastError("read past end of entry");
+        return -1;
+    }
+    if (offset < reader->pos)  // backward: restart decoding from the entry's start
+    {
+        reader->Stop();
+        reader->pos = 0;
+    }
+    uint8_t scratch[65536];
+    while (reader->pos < offset)  // forward: decode and discard
+    {
+        const int64_t n = reader->Pull(scratch, std::min<uint64_t>(sizeof scratch, offset - reader->pos));
+        if (n <= 0)
+        {
+            if (n == 0)
+                SetLastError("Entry ended early");
+            return -1;
+        }
+    }
+    uint8_t *out = static_cast<uint8_t *>(buf);
+    uint64_t got = 0;
+    while (got < size)
+    {
+        const int64_t n = reader->Pull(out + got, size - got);
+        if (n <= 0)
+        {
+            if (n == 0)
+                SetLastError("Entry ended early");
+            return -1;
+        }
+        got += (uint64_t)n;
+    }
+    return 0;
+}
+
+void sevenzip_entry_reader_close(SevenZipEntryReader *reader)
+{
+    if (!reader)
+        return;
+    reader->Stop();
+    sevenzip_close(reader->archive);
+    delete reader;
+}
+#endif
