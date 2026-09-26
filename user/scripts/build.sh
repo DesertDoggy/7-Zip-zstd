@@ -10,27 +10,29 @@ set -euo pipefail
 # Usage:
 #   user/scripts/build_sevenzip_lib.sh                 # auto-detect platform/arch
 #   user/scripts/build_sevenzip_lib.sh <platform> <arch>
-#   user/scripts/build_sevenzip_lib.sh [--streaming] [<platform> <arch>]
+#   user/scripts/build_sevenzip_lib.sh --nostreaming [<platform> <arch>]
 #
-# --streaming builds the streaming-capable variant (-DSEVENZIP_WITH_STREAMING, which
+# Builds the streaming-capable variant by default (-DSEVENZIP_WITH_STREAMING, which
 # compiles in sevenzip_extract_entry_stream -- see user/sevenzip_lib.h) into
-# user/release/with_streaming/<platform>/<arch>/<version>/ instead of
-# user/release/<platform>/<arch>/<version>/. Both variants can coexist: the default
+# user/release/with_streaming/<platform>/<arch>/<version>/. --nostreaming builds the plain
+# variant into user/release/<platform>/<arch>/<version>/ instead (--streaming is still
+# accepted, as a no-op). Both variants can coexist: the default
 # build's sources, flags, export list and output path are untouched by this flag, so
 # the two can be built from the same commit and benchmarked against each other.
 
-streaming=0
+streaming=1
 args=()
 for arg in "$@"; do
   case "$arg" in
     --streaming) streaming=1 ;;
+    --nostreaming) streaming=0 ;;
     *) args+=("$arg") ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
 
 if [[ $# -ne 0 && $# -ne 2 ]]; then
-  echo "[ERROR] Usage: $0 [--streaming]  OR  $0 [--streaming] <platform> <arch>" >&2
+  echo "[ERROR] Usage: $0 [--nostreaming]  OR  $0 [--nostreaming] <platform> <arch>" >&2
   exit 2
 fi
 

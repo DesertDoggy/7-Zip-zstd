@@ -130,8 +130,8 @@ SEVENZIP_API void sevenzip_free_buffer(uint8_t* data);
 #ifdef SEVENZIP_WITH_STREAMING
 /* ---------------------------------------------------------------------------
  * Streaming extraction (only in a library built with SEVENZIP_WITH_STREAMING --
- * see user/scripts/build.sh --streaming, which builds to
- * user/release/with_streaming/<platform>/<arch>/<version>/). The default build
+ * user/scripts/build.sh builds this by default, to
+ * user/release/with_streaming/<platform>/<arch>/<version>/). The --nostreaming build
  * exports none of the symbols below, so a caller resolving them dynamically can
  * use their presence to detect a streaming-capable library.
  * --------------------------------------------------------------------------- */

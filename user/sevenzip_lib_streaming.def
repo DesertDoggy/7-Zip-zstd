@@ -1,4 +1,4 @@
-; Exports for the streaming build (build.sh --streaming, i.e. -DSEVENZIP_WITH_STREAMING).
+; Exports for the streaming build (build.sh's default build, i.e. -DSEVENZIP_WITH_STREAMING).
 ; Identical to sevenzip_lib.def plus the streaming entry points. Kept as a separate
 ; file so the default build's export list stays exactly as it is -- listing a symbol the
 ; default build doesn't compile would break the MinGW link.
