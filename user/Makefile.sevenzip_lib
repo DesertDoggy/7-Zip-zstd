@@ -196,7 +196,6 @@ COMPRESS_OBJS = \
   $O/Deflate64Register.o \
   $O/DeflateDecoder.o \
   $O/DeflateEncoder.o \
-  $O/DeflateRegister.o \
   $O/DeltaFilter.o \
   $O/ImplodeDecoder.o \
   $O/LzfseDecoder.o \
@@ -340,6 +339,7 @@ CRYPTO_OBJS = \
 # Client7z.cpp-style helper objects it needs directly.
 CURRENT_OBJS = \
   $O/sevenzip_lib.o \
+  $O/zlibng_deflate.o \
 
 ARC_OBJS = \
   $(LZMA_DEC_OPT_OBJS) \
@@ -363,7 +363,28 @@ OBJS = $(ARC_OBJS)
 # the whole file (includes counted in place), and a rule defined earlier in this file
 # would otherwise silently become the default goal instead, building only
 # sevenzip_lib.o and stopping without ever linking the final library.
+# zlib-ng, appended to the link line for user/zlibng_deflate.o.
+#
+# The *dynamic* library, with an $ORIGIN rpath so 7z.so finds libz.so sitting beside it
+# wherever the consuming app deploys its libraries (scripts/move_libs_to_app_root.sh puts both
+# in the same directory). Two reasons over the static archive: that archive is not built
+# -fPIC, so it cannot go into a shared object at all; and the app already dlopen()s this same
+# libz.so for CHD's zlib codecs, so linking dynamically keeps one copy of zlib-ng in the
+# process instead of two.
+MY_LIBS += $(ZLIBNG_LIB)
+
 include ../../7zip_gcc.mak
 
 $O/sevenzip_lib.o: ../../../../user/sevenzip_lib.cpp
 	$(CXX) $(CXXFLAGS) $<
+
+# Deflate decoding via zlib-ng (user/zlibng_deflate.cpp) in place of 7-Zip's own decoder:
+# measured ~667 MB/s against ~205 through this library's extract path. DeflateRegister.o is
+# dropped from COMPRESS_OBJS above so exactly one codec claims method 0x40108; DeflateDecoder.o
+# stays, because Deflate64Register and ZlibDecoder still use it.
+#
+# ZLIBNG_INC / ZLIBNG_LIB come from user/scripts/build.sh, which resolves the zlib-ng release
+# tree. The static archive is linked so the produced 7z.so carries zlib-ng itself and needs no
+# libz.so beside it at run time.
+$O/zlibng_deflate.o: ../../../../user/zlibng_deflate.cpp
+	$(CXX) $(CXXFLAGS) -I$(ZLIBNG_INC) $<

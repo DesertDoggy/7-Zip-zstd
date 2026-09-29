@@ -180,8 +180,43 @@ if [[ "$platform" == "windows" ]]; then
   make_vars+=("CFLAGS_WARN_WALL=-Werror -Wall -Wextra -Wno-cast-function-type")
 fi
 
+# zlib-ng, for user/zlibng_deflate.cpp -- the Deflate decoder this library registers in place
+# of 7-Zip's own (see that file for the measurements). Taken from the sibling zlib-ng
+# submodule's release tree, newest version by mtime, matching how the consuming app locates
+# every other vendored library. Static archive: the produced 7z.so then carries zlib-ng and
+# needs nothing beside it at run time.
+zlibng_root="$(cd "$user_dir/../.." && pwd)/zlib-ng/user/release/$platform/$arch"
+zlibng_version_dir=""
+if [[ -d "$zlibng_root" ]]; then
+  # `|| true`: ls exits non-zero when one of the two globs matches nothing (zlib-ng has no
+  # v-prefixed versions), and under `set -e` that status propagates out of the assignment and
+  # kills the script before it can report anything.
+  zlibng_version_dir="$(ls -1dt "$zlibng_root"/[0-9]*/ "$zlibng_root"/v[0-9]*/ 2>/dev/null | head -1 || true)"
+  zlibng_version_dir="${zlibng_version_dir%/}"
+fi
+case "$platform" in
+  windows) zlibng_shared="$zlibng_version_dir/dynamic/zlib.dll" ;;
+  mac)     zlibng_shared="$zlibng_version_dir/dynamic/libz.dylib" ;;
+  *)       zlibng_shared="$zlibng_version_dir/dynamic/libz.so" ;;
+esac
+if [[ -z "$zlibng_version_dir" || ! -f "$zlibng_shared" || ! -f "$zlibng_version_dir/include/zlib.h" ]]; then
+  echo "[ERROR] zlib-ng not found under $zlibng_root (need <version>/include/zlib.h and the dynamic library)." >&2
+  echo "[ERROR] Build it first: submodules/zlib-ng/user/scripts/build.sh $platform $arch" >&2
+  exit 1
+fi
+# -rpath $ORIGIN: the produced 7z.so is dlopen()ed from the app's library directory, and the
+# zlib-ng shared library is deployed into that same directory, so resolve it relative to 7z.so
+# rather than falling through to the system zlib.
+#
+# Quoting, in three layers, because getting any one wrong fails silently with an *empty*
+# RUNPATH rather than an error: `\$\$` makes bash emit `$$`, make turns that into a single `$`,
+# and the surrounding single quotes stop make's recipe shell from expanding `$ORIGIN` to
+# nothing.
+make_vars+=("ZLIBNG_INC=$zlibng_version_dir/include" "ZLIBNG_LIB=-L$zlibng_version_dir/dynamic -lz -Wl,-rpath,'\$\$ORIGIN'")
+
 {
   echo "[INFO] platform=$platform arch=$arch output_version=$output_version streaming=$streaming"
+  echo "[INFO] zlib-ng=$zlibng_version_dir"
   echo "[INFO] make_dir=$make_dir"
   echo "[INFO] build_dir=$build_dir"
   echo "[INFO] out_dir=$out_dir"

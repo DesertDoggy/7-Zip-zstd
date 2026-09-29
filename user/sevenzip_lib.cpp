@@ -350,7 +350,19 @@ class CArchiveExtractCallback Z7_final:
 public:
     bool ToBuffer;
     FString OutFilePath;             // used when !ToBuffer
-    CMemOutStream *MemStreamSpec;    // used when ToBuffer (not owned; lifetime is the CMyComPtr's)
+    CMemOutStream *MemStreamSpec;    // used when ToBuffer; kept alive by MemStreamOwner below
+    // Owning reference to *MemStreamSpec for the whole extraction.
+    //
+    // Without it the buffer is read after it has been freed. SetOperationResult() calls
+    // _outStream.Release(), and 7-Zip then drops its own reference, so the CMemOutStream --
+    // and the std::vector holding every decompressed byte -- is destroyed before
+    // ExtractOne() copies Buf out. Small entries appeared to work only because glibc keeps
+    // sub-128KB allocations mapped after free; anything larger is mmap'd, munmap'd on free,
+    // and segfaults on the memcpy (reproduced at 4.8 MB, fine at 2 KB).
+    //
+    // This reference is held by the callback object itself, so it outlives
+    // SetOperationResult() and dies with the callback -- after the copy.
+    CMyComPtr<ISequentialOutStream> MemStreamOwner;
     UInt64 Total;
     SevenZipProgressCb OnProgress;
     void *UserData;
@@ -434,6 +446,7 @@ Z7_COM7F_IMF(CArchiveExtractCallback::GetStream(UInt32 index,
     {
         MemStreamSpec = new CMemOutStream();
         CMyComPtr<ISequentialOutStream> streamLoc(MemStreamSpec);
+        MemStreamOwner = streamLoc;   // survives SetOperationResult's _outStream.Release()
         _outStream = streamLoc;
         *outStream = streamLoc.Detach();
         return S_OK;
