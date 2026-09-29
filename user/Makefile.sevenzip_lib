@@ -384,7 +384,9 @@ $O/sevenzip_lib.o: ../../../../user/sevenzip_lib.cpp
 # stays, because Deflate64Register and ZlibDecoder still use it.
 #
 # ZLIBNG_INC / ZLIBNG_LIB come from user/scripts/build.sh, which resolves the zlib-ng release
-# tree. The static archive is linked so the produced 7z.so carries zlib-ng itself and needs no
-# libz.so beside it at run time.
+# tree and links the *dynamic* library with an $ORIGIN rpath, so zlib-ng's shared library must
+# be deployed beside the produced 7z.so (scripts/move_libs_to_app_root.sh does this, under both
+# libz.so and the SONAME libz.so.1). The static archive is not built -fPIC and cannot go into a
+# shared object at all.
 $O/zlibng_deflate.o: ../../../../user/zlibng_deflate.cpp
 	$(CXX) $(CXXFLAGS) -I$(ZLIBNG_INC) $<
