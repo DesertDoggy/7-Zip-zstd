@@ -183,8 +183,9 @@ fi
 # zlib-ng, for user/zlibng_deflate.cpp -- the Deflate decoder this library registers in place
 # of 7-Zip's own (see that file for the measurements). Taken from the sibling zlib-ng
 # submodule's release tree, newest version by mtime, matching how the consuming app locates
-# every other vendored library. Static archive: the produced 7z.so then carries zlib-ng and
-# needs nothing beside it at run time.
+# every other vendored library. The *dynamic* library is what gets linked (see ZLIBNG_LIB
+# below), so the produced 7z.so needs zlib-ng's shared library deployed beside it -- the
+# static archive is not built -fPIC and cannot go into a shared object at all.
 zlibng_root="$(cd "$user_dir/../.." && pwd)/zlib-ng/user/release/$platform/$arch"
 zlibng_version_dir=""
 if [[ -d "$zlibng_root" ]]; then
@@ -201,7 +202,8 @@ case "$platform" in
 esac
 if [[ -z "$zlibng_version_dir" || ! -f "$zlibng_shared" || ! -f "$zlibng_version_dir/include/zlib.h" ]]; then
   echo "[ERROR] zlib-ng not found under $zlibng_root (need <version>/include/zlib.h and the dynamic library)." >&2
-  echo "[ERROR] Build it first: submodules/zlib-ng/user/scripts/build.sh $platform $arch" >&2
+  echo "[ERROR] Build it first: submodules/zlib-ng/user/scripts/build-zlib-ng-release.sh --platform $platform" >&2
+  echo "[ERROR] (or scripts/build_native_deps.sh, which builds zlib-ng before this.)" >&2
   exit 1
 fi
 # -rpath $ORIGIN: the produced 7z.so is dlopen()ed from the app's library directory, and the
