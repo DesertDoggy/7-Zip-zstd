@@ -177,7 +177,14 @@ if [[ "$platform" == "windows" ]]; then
   # pointer type -- the standard, unavoidable idiom for calling a dynamically
   # resolved WinAPI function, which newer GCC's -Wcast-function-type (implied by
   # -Wextra) flags as an error under -Werror.
-  make_vars+=("CFLAGS_WARN_WALL=-Werror -Wall -Wextra -Wno-cast-function-type")
+  warn="-Werror -Wall -Wextra -Wno-cast-function-type"
+  # windows/arm64 is llvm-mingw clang on a path upstream never builds with -Werror, and it
+  # trips upstream code rather than ours: C/Threads.h's x86-only force_align_arg_pointer
+  # applied to any `_WIN32 && __GNUC__`, and C/Sha512.c's aarch64 SIGILL probe (an unused
+  # parameter, printf without <stdio.h>). Warnings stay visible; they just are not fatal on
+  # this one target, instead of patching upstream sources one warning at a time.
+  [[ "$arch" == "arm64" ]] && warn="-Wall -Wextra -Wno-cast-function-type -Wno-unknown-attributes"
+  make_vars+=("CFLAGS_WARN_WALL=$warn")
 fi
 
 # zlib-ng, for user/zlibng_deflate.cpp -- the Deflate decoder this library registers in place
@@ -214,7 +221,19 @@ fi
 # RUNPATH rather than an error: `\$\$` makes bash emit `$$`, make turns that into a single `$`,
 # and the surrounding single quotes stop make's recipe shell from expanding `$ORIGIN` to
 # nothing.
-make_vars+=("ZLIBNG_INC=$zlibng_version_dir/include" "ZLIBNG_LIB=-L$zlibng_version_dir/dynamic -lz -Wl,-rpath,'\$\$ORIGIN'")
+if [[ "$platform" == "windows" ]]; then
+  # Windows links 7z.dll with -static, and `-lz` under -static is resolved by a *search*: on
+  # an MSYS2 host that search finds MSYS2's own stock /mingw64/lib/libz.a first, so the
+  # windows/x64 7z.dll used to link plain zlib rather than zlib-ng -- silently, with no
+  # zlib import to give it away. (llvm-mingw, which windows/arm64 uses, has no libz to
+  # fall back on and failed with "unable to find library -lz", which is how this came to
+  # light.) Naming zlib-ng's static archive by path links exactly that, into 7z.dll itself;
+  # PE has no rpath, so there is nothing else to say.
+  [[ -f "$zlibng_version_dir/static/libz.a" ]] || { echo "[ERROR] no $zlibng_version_dir/static/libz.a -- rebuild zlib-ng" >&2; exit 1; }
+  make_vars+=("ZLIBNG_INC=$zlibng_version_dir/include" "ZLIBNG_LIB=$zlibng_version_dir/static/libz.a")
+else
+  make_vars+=("ZLIBNG_INC=$zlibng_version_dir/include" "ZLIBNG_LIB=-L$zlibng_version_dir/dynamic -lz -Wl,-rpath,'\$\$ORIGIN'")
+fi
 
 {
   echo "[INFO] platform=$platform arch=$arch output_version=$output_version streaming=$streaming"

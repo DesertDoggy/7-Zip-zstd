@@ -574,7 +574,7 @@ Are there any ways to fix the problems with arm64-wine and x64-SDE cases?
       return False;
     }
     */
-    printf("====== signal(SIGILL)\n");
+    PRF(printf("====== signal(SIGILL)\n");)
     signal_prev = signal(SIGILL, Sha512_signal_Handler);
     if (signal_prev == SIG_ERR)
     {
