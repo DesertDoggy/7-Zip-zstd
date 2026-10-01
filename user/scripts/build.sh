@@ -66,7 +66,7 @@ else
   arch="$2"
 fi
 
-output_version="$(git -C "$repo_root" describe --tags 2>/dev/null || echo dev)"
+output_version="$(git -C "$repo_root" describe --tags 2>/dev/null || date +%Y%m%d-%H%M%S)"
 
 # Disposable scratch build dir -- see build.sh's own history for why: object paths get
 # repeated once per linked object, and a long path here can blow past Windows' ~32K
